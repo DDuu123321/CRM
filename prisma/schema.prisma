@@ -1,6 +1,7 @@
-// Bluven CRM — Phase 1 walking-skeleton schema.
-// Minimal on purpose: User (auth + RBAC) · Lead (pipeline) · Activity (append-only log).
-// Extends later toward the concept map (Contact → Site → Deal → Job → Compliance…).
+// Bluven CRM — Phase 1 data model (refined spine).
+// Contact (person, dedup by email) ─< Site (property) and ─< Deal (pipeline).
+// Activity is the append-only log, attached to a Deal.
+// Extends later toward the concept map (Job/Installation → Compliance → Rebate…).
 
 generator client {
   provider = "prisma-client-js"
@@ -19,6 +20,8 @@ enum Role {
 
 enum LeadSource {
   WEBSITE_QUOTE
+  WEBSITE_ASSESSMENT
+  AI_CHAT
   WEBSITE_NEWSLETTER
   PHONE
   REFERRAL
@@ -49,26 +52,62 @@ model User {
   role         Role       @default(SALES)
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
-  ownedLeads   Lead[]     @relation("LeadOwner")
+  ownedDeals   Deal[]     @relation("DealOwner")
   activities   Activity[] @relation("ActivityActor")
 }
 
-model Lead {
+// The person. Identity anchor — deduplicated by email (a person can have many
+// sites and many deals over time).
+model Contact {
+  id        String   @id @default(cuid())
+  firstName String
+  lastName  String?
+  email     String?  @unique
+  phone     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  sites     Site[]
+  deals     Deal[]
+
+  @@index([phone])
+}
+
+// The property where a system goes. Separate from Contact — one person can own
+// multiple sites, and a site can change owners.
+model Site {
+  id        String   @id @default(cuid())
+  contact   Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  contactId String
+  address   String?
+  suburb    String?
+  state     String?
+  postcode  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deals     Deal[]
+
+  @@index([contactId])
+}
+
+// A sales opportunity — the pipeline unit. Carries stage, source, owner.
+model Deal {
   id         String        @id @default(cuid())
-  name       String
-  email      String?
-  phone      String?
-  postcode   String?
-  state      String?
-  source     LeadSource    @default(OTHER)
-  stage      PipelineStage @default(NEW)
-  owner      User?         @relation("LeadOwner", fields: [ownerId], references: [id])
+  contact    Contact       @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  contactId  String
+  site       Site?         @relation(fields: [siteId], references: [id], onDelete: SetNull)
+  siteId     String?
+  owner      User?         @relation("DealOwner", fields: [ownerId], references: [id])
   ownerId    String?
+  title      String?
+  stage      PipelineStage @default(NEW)
+  source     LeadSource    @default(OTHER)
   activities Activity[]
   createdAt  DateTime      @default(now())
   updatedAt  DateTime      @updatedAt
 
   @@index([stage])
+  @@index([contactId])
+  @@index([siteId])
   @@index([ownerId])
 }
 
@@ -76,13 +115,13 @@ model Lead {
 // that separates a CRM from a "forms table with a status column".
 model Activity {
   id        String       @id @default(cuid())
-  lead      Lead         @relation(fields: [leadId], references: [id], onDelete: Cascade)
-  leadId    String
+  deal      Deal         @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  dealId    String
   type      ActivityType @default(NOTE)
   body      String
   actor     User?        @relation("ActivityActor", fields: [actorId], references: [id])
   actorId   String?
   createdAt DateTime     @default(now())
 
-  @@index([leadId])
+  @@index([dealId])
 }

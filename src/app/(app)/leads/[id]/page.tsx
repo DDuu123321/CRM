@@ -7,14 +7,16 @@ import { addActivity, advanceStage } from "../actions";
 
 const STAGES = Object.values(PipelineStage);
 
-export default async function LeadDetailPage({
+export default async function DealDetailPage({
   params,
 }: {
   params: { id: string };
 }) {
-  const lead = await prisma.lead.findUnique({
+  const deal = await prisma.deal.findUnique({
     where: { id: params.id },
     include: {
+      contact: true,
+      site: true,
       owner: true,
       activities: {
         orderBy: { createdAt: "desc" },
@@ -23,42 +25,62 @@ export default async function LeadDetailPage({
     },
   });
 
-  if (!lead) notFound();
+  if (!deal) notFound();
+
+  const contactName = `${deal.contact.firstName}${
+    deal.contact.lastName ? ` ${deal.contact.lastName}` : ""
+  }`;
 
   return (
     <div className="space-y-8">
       <div>
         <Link href="/leads" className="text-sm text-slate-500 hover:underline">
-          ← Leads
+          ← Pipeline
         </Link>
-        <h1 className="mt-2 text-2xl font-semibold">{lead.name}</h1>
-        <p className="text-sm text-slate-500">
-          {lead.email ?? "—"} · {lead.phone ?? "—"} · {lead.state ?? "—"}{" "}
-          {lead.postcode ?? ""}
-        </p>
+        <h1 className="mt-2 text-2xl font-semibold">
+          {deal.title ?? contactName}
+        </h1>
+        <p className="text-sm text-slate-500">{contactName}</p>
       </div>
 
       <div className="grid grid-cols-3 gap-8">
         <section className="col-span-1 space-y-6">
-          <div className="rounded-xl border border-slate-200 bg-white p-5 text-sm">
-            <dl className="space-y-2">
-              <Row label="Stage" value={lead.stage} />
-              <Row label="Source" value={lead.source} />
-              <Row label="Owner" value={lead.owner?.name ?? "—"} />
-              <Row label="Created" value={lead.createdAt.toLocaleString()} />
-            </dl>
-          </div>
+          <Card title="Contact">
+            <Row label="Name" value={contactName} />
+            <Row label="Email" value={deal.contact.email ?? "—"} />
+            <Row label="Phone" value={deal.contact.phone ?? "—"} />
+          </Card>
+
+          <Card title="Site">
+            {deal.site ? (
+              <>
+                <Row label="Address" value={deal.site.address ?? "—"} />
+                <Row label="Suburb" value={deal.site.suburb ?? "—"} />
+                <Row label="State" value={deal.site.state ?? "—"} />
+                <Row label="Postcode" value={deal.site.postcode ?? "—"} />
+              </>
+            ) : (
+              <p className="text-slate-400">No site on file.</p>
+            )}
+          </Card>
+
+          <Card title="Deal">
+            <Row label="Stage" value={deal.stage} />
+            <Row label="Source" value={deal.source} />
+            <Row label="Owner" value={deal.owner?.name ?? "—"} />
+            <Row label="Created" value={deal.createdAt.toLocaleString()} />
+          </Card>
 
           <form
             action={advanceStage}
             className="rounded-xl border border-slate-200 bg-white p-5"
           >
-            <input type="hidden" name="leadId" value={lead.id} />
+            <input type="hidden" name="dealId" value={deal.id} />
             <label className="block text-sm">
               <span className="font-medium text-slate-700">Advance stage</span>
               <select
                 name="stage"
-                defaultValue={lead.stage}
+                defaultValue={deal.stage}
                 className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
               >
                 {STAGES.map((s) => (
@@ -78,11 +100,11 @@ export default async function LeadDetailPage({
           <h2 className="text-lg font-semibold">Activity</h2>
 
           <form
-            key={lead.activities.length}
+            key={deal.activities.length}
             action={addActivity}
             className="flex gap-2"
           >
-            <input type="hidden" name="leadId" value={lead.id} />
+            <input type="hidden" name="dealId" value={deal.id} />
             <input
               name="body"
               required
@@ -95,7 +117,7 @@ export default async function LeadDetailPage({
           </form>
 
           <ol className="space-y-3">
-            {lead.activities.map((a) => (
+            {deal.activities.map((a) => (
               <li
                 key={a.id}
                 className="rounded-lg border border-slate-200 bg-white p-3 text-sm"
@@ -114,7 +136,7 @@ export default async function LeadDetailPage({
                 </p>
               </li>
             ))}
-            {lead.activities.length === 0 && (
+            {deal.activities.length === 0 && (
               <li className="text-sm text-slate-400">No activity yet.</li>
             )}
           </ol>
@@ -124,11 +146,28 @@ export default async function LeadDetailPage({
   );
 }
 
+function Card({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-5 text-sm">
+      <p className="mb-3 text-xs font-medium uppercase tracking-wide text-slate-400">
+        {title}
+      </p>
+      <dl className="space-y-2">{children}</dl>
+    </div>
+  );
+}
+
 function Row({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex justify-between">
-      <dt className="text-slate-500">{label}</dt>
-      <dd className="font-medium text-slate-900">{value}</dd>
+    <div className="flex justify-between gap-4">
+      <dt className="shrink-0 text-slate-500">{label}</dt>
+      <dd className="text-right font-medium text-slate-900">{value}</dd>
     </div>
   );
 }

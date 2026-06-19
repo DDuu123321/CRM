@@ -14,87 +14,147 @@ async function requireUserId() {
   return session.user.id;
 }
 
-const newLeadSchema = z.object({
-  name: z.string().min(1),
+const newDealSchema = z.object({
+  firstName: z.string().min(1),
+  lastName: z.string().optional(),
   email: z.string().email().optional().or(z.literal("")),
   phone: z.string().optional(),
-  postcode: z.string().optional(),
+  address: z.string().optional(),
+  suburb: z.string().optional(),
   state: z.string().optional(),
+  postcode: z.string().optional(),
+  title: z.string().optional(),
 });
 
-export async function createLead(formData: FormData) {
+export async function createDeal(formData: FormData) {
   const userId = await requireUserId();
 
-  const parsed = newLeadSchema.parse({
-    name: formData.get("name"),
+  const d = newDealSchema.parse({
+    firstName: formData.get("firstName"),
+    lastName: formData.get("lastName") ?? "",
     email: formData.get("email") ?? "",
     phone: formData.get("phone") ?? "",
-    postcode: formData.get("postcode") ?? "",
+    address: formData.get("address") ?? "",
+    suburb: formData.get("suburb") ?? "",
     state: formData.get("state") ?? "",
+    postcode: formData.get("postcode") ?? "",
+    title: formData.get("title") ?? "",
   });
 
-  const lead = await prisma.lead.create({
-    data: {
-      name: parsed.name,
-      email: parsed.email || null,
-      phone: parsed.phone || null,
-      postcode: parsed.postcode || null,
-      state: parsed.state || null,
-      ownerId: userId,
-      activities: {
-        create: { type: "NOTE", body: "Lead created.", actorId: userId },
+  // Contact is the identity anchor: dedup by email when one is given, so a
+  // repeat enquiry from the same person reuses their contact record.
+  // Contact + Site + Deal in one transaction, so a partial failure can't leave
+  // an orphaned contact or site behind.
+  // Normalise the email so an empty/whitespace value cleanly skips dedup.
+  const email = (d.email ?? "").trim() || null;
+
+  const deal = await prisma.$transaction(async (tx) => {
+    // Dedup by email when given; Contact is a stable identity anchor, so a
+    // repeat enquiry reuses it WITHOUT overwriting existing name/phone
+    // (sales can edit those by hand). No email → no dedup key → new contact.
+    const contact = email
+      ? await tx.contact.upsert({
+          where: { email },
+          update: {},
+          create: {
+            firstName: d.firstName,
+            lastName: d.lastName || null,
+            email,
+            phone: d.phone || null,
+          },
+        })
+      : await tx.contact.create({
+          data: {
+            firstName: d.firstName,
+            lastName: d.lastName || null,
+            phone: d.phone || null,
+          },
+        });
+
+    // Only create a Site if an address detail was actually entered.
+    let siteId: string | undefined;
+    if (d.address || d.suburb || d.state || d.postcode) {
+      const site = await tx.site.create({
+        data: {
+          contactId: contact.id,
+          address: d.address || null,
+          suburb: d.suburb || null,
+          state: d.state || null,
+          postcode: d.postcode || null,
+        },
+      });
+      siteId = site.id;
+    }
+
+    return tx.deal.create({
+      data: {
+        contactId: contact.id,
+        siteId,
+        ownerId: userId,
+        title: d.title || null,
+        activities: {
+          create: { type: "NOTE", body: "Deal created.", actorId: userId },
+        },
       },
-    },
+    });
   });
 
   revalidatePath("/leads");
-  redirect(`/leads/${lead.id}`);
+  redirect(`/leads/${deal.id}`);
 }
 
 // NOTE (authz): the mutations below check authentication, not ownership — any
-// signed-in user can act on any lead by id. Fine with a single admin. When
+// signed-in user can act on any deal by id. Fine with a single admin. When
 // multi-user RBAC lands (Phase 2), gate here with the chosen policy
 // (owner-only vs team-visible vs role-based) before the write.
 export async function advanceStage(formData: FormData) {
   const userId = await requireUserId();
 
-  const leadId = String(formData.get("leadId") ?? "");
+  const dealId = String(formData.get("dealId") ?? "");
   const stage = String(formData.get("stage") ?? "");
-  if (!leadId || !(stage in PipelineStage)) return;
+  if (!dealId || !(stage in PipelineStage)) return;
 
-  const lead = await prisma.lead.findUnique({ where: { id: leadId } });
-  if (!lead || lead.stage === stage) return;
+  // Read the current stage INSIDE the transaction so the audit entry always
+  // records the true previous stage, even under concurrent updates.
+  await prisma.$transaction(async (tx) => {
+    const deal = await tx.deal.findUnique({ where: { id: dealId } });
+    if (!deal || deal.stage === stage) return;
 
-  // Stage change + its audit entry, atomically.
-  await prisma.$transaction([
-    prisma.lead.update({
-      where: { id: leadId },
+    await tx.deal.update({
+      where: { id: dealId },
       data: { stage: stage as PipelineStage },
-    }),
-    prisma.activity.create({
+    });
+    await tx.activity.create({
       data: {
-        leadId,
+        dealId,
         type: "STAGE_CHANGE",
-        body: `Stage changed: ${lead.stage} → ${stage}`,
+        body: `Stage changed: ${deal.stage} → ${stage}`,
         actorId: userId,
       },
-    }),
-  ]);
+    });
+  });
 
-  revalidatePath(`/leads/${leadId}`);
+  revalidatePath(`/leads/${dealId}`);
   revalidatePath("/leads");
 }
 
 export async function addActivity(formData: FormData) {
   const userId = await requireUserId();
 
-  const leadId = String(formData.get("leadId") ?? "");
+  const dealId = String(formData.get("dealId") ?? "");
   const body = String(formData.get("body") ?? "").trim();
-  if (!leadId || !body) return;
+  if (!dealId || !body) return;
+
+  // Guard the FK so a stale dealId fails gracefully instead of a 500.
+  const deal = await prisma.deal.findUnique({
+    where: { id: dealId },
+    select: { id: true },
+  });
+  if (!deal) return;
 
   await prisma.activity.create({
-    data: { leadId, type: "NOTE", body, actorId: userId },
+    data: { dealId, type: "NOTE", body, actorId: userId },
   });
 
-  revalidatePath(`/leads/${leadId}`);
+  revalidatePath(`/leads/${dealId}`);
 }

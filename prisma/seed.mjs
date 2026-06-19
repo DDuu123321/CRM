@@ -18,18 +18,33 @@ async function main() {
   });
   console.log("Admin user ready:", admin.email);
 
-  const existing = await prisma.lead.count();
+  const existing = await prisma.deal.count();
   if (existing === 0) {
-    await prisma.lead.create({
+    const jane = await prisma.contact.create({
       data: {
-        name: "Jane Homeowner",
+        firstName: "Jane",
+        lastName: "Homeowner",
         email: "jane@example.com",
         phone: "0400 000 000",
-        postcode: "6000",
-        state: "WA",
-        source: "WEBSITE_QUOTE",
-        stage: "NEW",
+        sites: {
+          create: {
+            address: "12 Solar St",
+            suburb: "Perth",
+            state: "WA",
+            postcode: "6000",
+          },
+        },
+      },
+      include: { sites: true },
+    });
+    await prisma.deal.create({
+      data: {
+        contactId: jane.id,
+        siteId: jane.sites[0].id,
         ownerId: admin.id,
+        title: "6.6kW solar + battery",
+        stage: "NEW",
+        source: "WEBSITE_QUOTE",
         activities: {
           create: {
             type: "NOTE",
@@ -39,21 +54,38 @@ async function main() {
         },
       },
     });
-    await prisma.lead.create({
+
+    const bob = await prisma.contact.create({
       data: {
-        name: "Bob Strata",
+        firstName: "Bob",
+        lastName: "Strata",
         email: "bob@example.com",
         phone: "0411 111 111",
-        postcode: "3000",
-        state: "VIC",
-        source: "REFERRAL",
-        stage: "CONTACTED",
+        sites: {
+          create: {
+            address: "5 Grid Rd",
+            suburb: "Melbourne",
+            state: "VIC",
+            postcode: "3000",
+          },
+        },
+      },
+      include: { sites: true },
+    });
+    await prisma.deal.create({
+      data: {
+        contactId: bob.id,
+        siteId: bob.sites[0].id,
         ownerId: admin.id,
+        title: "Battery retrofit",
+        stage: "CONTACTED",
+        source: "REFERRAL",
       },
     });
-    console.log("Seeded 2 sample leads.");
+
+    console.log("Seeded 2 contacts + sites + deals.");
   } else {
-    console.log(`Leads already present (${existing}), skipping samples.`);
+    console.log(`Deals already present (${existing}), skipping samples.`);
   }
 }
 
