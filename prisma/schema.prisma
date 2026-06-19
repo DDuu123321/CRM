@@ -1,0 +1,88 @@
+// Bluven CRM — Phase 1 walking-skeleton schema.
+// Minimal on purpose: User (auth + RBAC) · Lead (pipeline) · Activity (append-only log).
+// Extends later toward the concept map (Contact → Site → Deal → Job → Compliance…).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  SALES
+  INSTALLER
+}
+
+enum LeadSource {
+  WEBSITE_QUOTE
+  WEBSITE_NEWSLETTER
+  PHONE
+  REFERRAL
+  OTHER
+}
+
+enum PipelineStage {
+  NEW
+  CONTACTED
+  QUALIFIED
+  QUOTED
+  WON
+  LOST
+}
+
+enum ActivityType {
+  NOTE
+  STAGE_CHANGE
+  CALL
+  EMAIL
+}
+
+model User {
+  id           String     @id @default(cuid())
+  email        String     @unique
+  name         String?
+  passwordHash String
+  role         Role       @default(SALES)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  ownedLeads   Lead[]     @relation("LeadOwner")
+  activities   Activity[] @relation("ActivityActor")
+}
+
+model Lead {
+  id         String        @id @default(cuid())
+  name       String
+  email      String?
+  phone      String?
+  postcode   String?
+  state      String?
+  source     LeadSource    @default(OTHER)
+  stage      PipelineStage @default(NEW)
+  owner      User?         @relation("LeadOwner", fields: [ownerId], references: [id])
+  ownerId    String?
+  activities Activity[]
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+
+  @@index([stage])
+  @@index([ownerId])
+}
+
+// Append-only. Never expose update/delete in the app — this is the audit trail
+// that separates a CRM from a "forms table with a status column".
+model Activity {
+  id        String       @id @default(cuid())
+  lead      Lead         @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  leadId    String
+  type      ActivityType @default(NOTE)
+  body      String
+  actor     User?        @relation("ActivityActor", fields: [actorId], references: [id])
+  actorId   String?
+  createdAt DateTime     @default(now())
+
+  @@index([leadId])
+}
