@@ -6,7 +6,7 @@ import { z } from "zod";
 
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
-import { PipelineStage } from "@prisma/client";
+import { PipelineStage, QuoteStatus, Prisma } from "@prisma/client";
 import { syncLeads } from "@/lib/sync";
 
 async function requireUserId() {
@@ -182,4 +182,201 @@ export async function syncNow() {
       error: err instanceof Error ? err.message : "Sync failed",
     };
   }
+}
+
+// ── Lead assignment ────────────────────────────────────────
+export async function assignDeal(formData: FormData) {
+  const userId = await requireUserId();
+  const dealId = String(formData.get("dealId") ?? "");
+  if (!dealId) return;
+  const ownerId = String(formData.get("ownerId") ?? "") || null;
+
+  // Validate the owner + write inside one transaction, so the user can't be
+  // deleted between the FK check and the update.
+  await prisma.$transaction(async (tx) => {
+    const deal = await tx.deal.findUnique({
+      where: { id: dealId },
+      include: { owner: { select: { name: true } } },
+    });
+    if (!deal || deal.ownerId === ownerId) return;
+
+    let newOwnerName = "Unassigned";
+    if (ownerId) {
+      const u = await tx.user.findUnique({
+        where: { id: ownerId },
+        select: { name: true },
+      });
+      if (!u) return; // unknown user → ignore (guards the FK)
+      newOwnerName = u.name ?? "user";
+    }
+
+    await tx.deal.update({ where: { id: dealId }, data: { ownerId } });
+    await tx.activity.create({
+      data: {
+        dealId,
+        type: "NOTE",
+        body: `Owner: ${deal.owner?.name ?? "Unassigned"} → ${newOwnerName}.`,
+        actorId: userId,
+      },
+    });
+  });
+
+  revalidatePath(`/leads/${dealId}`);
+  revalidatePath("/leads");
+}
+
+// ── Quotes (minimal CPQ — manual line items, no product catalog) ───────────
+const lineItemSchema = z.object({
+  description: z.string().min(1).max(200),
+  quantity: z.coerce.number().int().min(1).max(999999),
+  // Validate the raw string to ≤2 decimals so it stores into Decimal(10,2)
+  // exactly — a JS float (z.coerce.number) like 100.555 would silently round.
+  // Prisma accepts the string for a Decimal column.
+  unitPrice: z
+    .string()
+    .trim()
+    .regex(/^\d+(\.\d{1,2})?$/)
+    .refine((v) => Number(v) <= 99999999.99),
+});
+
+function aud(d: Prisma.Decimal) {
+  return "$" + d.toFixed(2);
+}
+
+export async function createQuote(formData: FormData) {
+  await requireUserId();
+  const dealId = String(formData.get("dealId") ?? "");
+  if (!dealId) return;
+  const deal = await prisma.deal.findUnique({
+    where: { id: dealId },
+    select: { id: true },
+  });
+  if (!deal) return;
+  await prisma.quote.create({ data: { dealId } });
+  revalidatePath(`/leads/${dealId}`);
+}
+
+export async function addLineItem(formData: FormData) {
+  await requireUserId();
+  const quoteId = String(formData.get("quoteId") ?? "");
+  if (!quoteId) return;
+
+  const parsed = lineItemSchema.safeParse({
+    description: formData.get("description"),
+    quantity: formData.get("quantity"),
+    unitPrice: formData.get("unitPrice"),
+  });
+  if (!parsed.success) return;
+
+  // Only DRAFT quotes are editable.
+  const quote = await prisma.quote.findUnique({
+    where: { id: quoteId },
+    select: { dealId: true, status: true },
+  });
+  if (!quote || quote.status !== "DRAFT") return;
+
+  await prisma.quoteLineItem.create({
+    data: {
+      quoteId,
+      description: parsed.data.description,
+      quantity: parsed.data.quantity,
+      unitPrice: parsed.data.unitPrice,
+    },
+  });
+  revalidatePath(`/leads/${quote.dealId}`);
+}
+
+export async function removeLineItem(formData: FormData) {
+  await requireUserId();
+  const lineItemId = String(formData.get("lineItemId") ?? "");
+  if (!lineItemId) return;
+
+  const li = await prisma.quoteLineItem.findUnique({
+    where: { id: lineItemId },
+    include: { quote: { select: { dealId: true, status: true } } },
+  });
+  if (!li || li.quote.status !== "DRAFT") return;
+
+  await prisma.quoteLineItem.delete({ where: { id: lineItemId } });
+  revalidatePath(`/leads/${li.quote.dealId}`);
+}
+
+// DRAFT → SENT (deal → QUOTED) · SENT → ACCEPTED (deal → WON) / DECLINED.
+export async function setQuoteStatus(formData: FormData) {
+  const userId = await requireUserId();
+  const quoteId = String(formData.get("quoteId") ?? "");
+  const status = String(formData.get("status") ?? "");
+  if (!quoteId || !(status in QuoteStatus)) return;
+
+  const quote = await prisma.quote.findUnique({
+    where: { id: quoteId },
+    include: { lineItems: true },
+  });
+  if (!quote || quote.status === status) return;
+
+  // Enforce the state machine: DRAFT→SENT, SENT→ACCEPTED/DECLINED only. Without
+  // this a crafted POST could jump DRAFT→ACCEPTED and skip SENT (deal→WON).
+  const allowed: Record<string, string[]> = {
+    DRAFT: ["SENT"],
+    SENT: ["ACCEPTED", "DECLINED"],
+    ACCEPTED: [],
+    DECLINED: [],
+  };
+  if (!allowed[quote.status]?.includes(status)) return;
+  // Don't send an empty quote (the UI disables this; guard the direct POST too).
+  if (status === "SENT" && quote.lineItems.length === 0) return;
+
+  const total = quote.lineItems.reduce(
+    (acc, li) => acc.plus(li.unitPrice.mul(li.quantity)),
+    new Prisma.Decimal(0),
+  );
+
+  await prisma.$transaction(async (tx) => {
+    await tx.quote.update({
+      where: { id: quoteId },
+      data: { status: status as QuoteStatus },
+    });
+
+    if (status === "SENT") {
+      await tx.deal.update({
+        where: { id: quote.dealId },
+        data: { stage: "QUOTED" },
+      });
+      await tx.activity.create({
+        data: {
+          dealId: quote.dealId,
+          type: "EMAIL",
+          body: `Quote sent — ${aud(total)}.`,
+          actorId: userId,
+        },
+      });
+    } else if (status === "ACCEPTED") {
+      await tx.deal.update({
+        where: { id: quote.dealId },
+        data: { stage: "WON" },
+      });
+      await tx.activity.create({
+        data: {
+          dealId: quote.dealId,
+          type: "NOTE",
+          body: `Quote accepted — ${aud(total)}. Deal won.`,
+          actorId: userId,
+        },
+      });
+    } else if (status === "DECLINED") {
+      // Decline ≠ lost deal — the rep decides the deal's next stage (re-quote or
+      // mark LOST by hand), so we only record the decline here.
+      await tx.activity.create({
+        data: {
+          dealId: quote.dealId,
+          type: "NOTE",
+          body: "Quote declined.",
+          actorId: userId,
+        },
+      });
+    }
+  });
+
+  revalidatePath(`/leads/${quote.dealId}`);
+  revalidatePath("/leads");
 }

@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { prisma } from "@/lib/prisma";
+import { Prisma, PipelineStage, LeadSource } from "@prisma/client";
 import { createDeal } from "./actions";
 import { SyncButton } from "./sync-button";
 
@@ -13,26 +14,113 @@ const STAGE_LABELS: Record<string, string> = {
   LOST: "Lost",
 };
 
-export default async function PipelinePage() {
-  const deals = await prisma.deal.findMany({
-    orderBy: { createdAt: "desc" },
-    include: {
-      contact: true,
-      site: true,
-      owner: true,
-      _count: { select: { activities: true } },
-    },
-  });
+export default async function PipelinePage({
+  searchParams,
+}: {
+  searchParams: { q?: string; stage?: string; source?: string; owner?: string };
+}) {
+  const q = (searchParams.q ?? "").trim();
+  const stage = searchParams.stage ?? "";
+  const source = searchParams.source ?? "";
+  const owner = searchParams.owner ?? "";
+
+  const where: Prisma.DealWhereInput = {};
+  if (stage in PipelineStage) where.stage = stage as PipelineStage;
+  if (source in LeadSource) where.source = source as LeadSource;
+  if (owner === "unassigned") where.ownerId = null;
+  else if (owner) where.ownerId = owner;
+  if (q) {
+    // Prisma parameterises `contains`, so q is always a literal — no SQL injection.
+    where.contact = {
+      OR: [
+        { firstName: { contains: q, mode: "insensitive" } },
+        { lastName: { contains: q, mode: "insensitive" } },
+        { email: { contains: q, mode: "insensitive" } },
+      ],
+    };
+  }
+
+  const [deals, users] = await Promise.all([
+    prisma.deal.findMany({
+      where,
+      orderBy: { createdAt: "desc" },
+      include: {
+        contact: true,
+        site: true,
+        owner: true,
+        _count: { select: { activities: true } },
+      },
+    }),
+    prisma.user.findMany({
+      orderBy: { name: "asc" },
+      select: { id: true, name: true },
+    }),
+  ]);
+
+  const hasFilter = Boolean(q || stage || source || owner);
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       <section className="flex items-end justify-between">
         <div>
           <h1 className="text-2xl font-semibold">Pipeline</h1>
-          <p className="text-sm text-slate-500">{deals.length} deals</p>
+          <p className="text-sm text-slate-500">
+            {deals.length} deals{hasFilter ? " (filtered)" : ""}
+          </p>
         </div>
         <SyncButton />
       </section>
+
+      <form
+        method="get"
+        className="flex flex-wrap items-end gap-3 rounded-xl border border-slate-200 bg-white p-4"
+      >
+        <label className="text-sm">
+          <span className="text-slate-500">Search</span>
+          <input
+            name="q"
+            defaultValue={q}
+            placeholder="name or email"
+            className="mt-1 block w-48 rounded-md border border-slate-300 px-3 py-1.5 text-sm"
+          />
+        </label>
+        <FilterSelect
+          name="stage"
+          label="Stage"
+          value={stage}
+          options={Object.values(PipelineStage)}
+        />
+        <FilterSelect
+          name="source"
+          label="Source"
+          value={source}
+          options={Object.values(LeadSource)}
+        />
+        <label className="text-sm">
+          <span className="text-slate-500">Owner</span>
+          <select
+            name="owner"
+            defaultValue={owner}
+            className="mt-1 block w-44 rounded-md border border-slate-300 px-3 py-1.5 text-sm"
+          >
+            <option value="">Any</option>
+            <option value="unassigned">Unassigned</option>
+            {users.map((u) => (
+              <option key={u.id} value={u.id}>
+                {u.name ?? u.id}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button className="rounded-md bg-slate-900 px-4 py-1.5 text-sm font-medium text-white hover:bg-slate-700">
+          Filter
+        </button>
+        {hasFilter && (
+          <Link href="/leads" className="text-sm text-slate-500 hover:underline">
+            Clear
+          </Link>
+        )}
+      </form>
 
       <section className="overflow-hidden rounded-xl border border-slate-200 bg-white">
         <table className="w-full text-sm">
@@ -90,7 +178,7 @@ export default async function PipelinePage() {
             {deals.length === 0 && (
               <tr>
                 <td colSpan={7} className="px-4 py-6 text-center text-slate-400">
-                  No deals yet.
+                  {hasFilter ? "No deals match the filter." : "No deals yet."}
                 </td>
               </tr>
             )}
@@ -138,6 +226,36 @@ export default async function PipelinePage() {
         </form>
       </section>
     </div>
+  );
+}
+
+function FilterSelect({
+  name,
+  label,
+  value,
+  options,
+}: {
+  name: string;
+  label: string;
+  value: string;
+  options: string[];
+}) {
+  return (
+    <label className="text-sm">
+      <span className="text-slate-500">{label}</span>
+      <select
+        name={name}
+        defaultValue={value}
+        className="mt-1 block w-40 rounded-md border border-slate-300 px-3 py-1.5 text-sm"
+      >
+        <option value="">Any</option>
+        {options.map((o) => (
+          <option key={o} value={o}>
+            {o}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 

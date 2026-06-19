@@ -18,6 +18,18 @@ async function main() {
   });
   console.log("Admin user ready:", admin.email);
 
+  for (const s of [
+    { email: "sam@bluven.org.au", name: "Sam Sales" },
+    { email: "riley@bluven.org.au", name: "Riley Rep" },
+  ]) {
+    await prisma.user.upsert({
+      where: { email: s.email },
+      update: {},
+      create: { email: s.email, name: s.name, passwordHash, role: "SALES" },
+    });
+  }
+  console.log("Sales users ready.");
+
   const existing = await prisma.deal.count();
   if (existing === 0) {
     const jane = await prisma.contact.create({

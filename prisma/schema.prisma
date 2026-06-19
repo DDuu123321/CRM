@@ -44,6 +44,13 @@ enum ActivityType {
   EMAIL
 }
 
+enum QuoteStatus {
+  DRAFT
+  SENT
+  ACCEPTED
+  DECLINED
+}
+
 model User {
   id           String     @id @default(cuid())
   email        String     @unique
@@ -105,6 +112,7 @@ model Deal {
   stage      PipelineStage @default(NEW)
   source     LeadSource    @default(OTHER)
   activities Activity[]
+  quotes     Quote[]
   createdAt  DateTime      @default(now())
   updatedAt  DateTime      @updatedAt
 
@@ -135,4 +143,30 @@ model SyncState {
   source    String    @id
   cursor    DateTime?
   updatedAt DateTime  @updatedAt
+}
+
+// A quote attached to a Deal. Minimal CPQ: manually-entered line items with
+// totals computed from them. No product catalog / STC engine yet (Phase 2/4).
+model Quote {
+  id        String          @id @default(cuid())
+  deal      Deal            @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  dealId    String
+  status    QuoteStatus     @default(DRAFT)
+  lineItems QuoteLineItem[]
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  @@index([dealId])
+}
+
+model QuoteLineItem {
+  id          String   @id @default(cuid())
+  quote       Quote    @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  quoteId     String
+  description String
+  quantity    Int      @default(1)
+  unitPrice   Decimal  @db.Decimal(10, 2)
+  createdAt   DateTime @default(now())
+
+  @@index([quoteId])
 }
