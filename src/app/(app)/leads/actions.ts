@@ -7,6 +7,7 @@ import { z } from "zod";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { PipelineStage } from "@prisma/client";
+import { syncLeads } from "@/lib/sync";
 
 async function requireUserId() {
   const session = await auth();
@@ -45,8 +46,9 @@ export async function createDeal(formData: FormData) {
   // repeat enquiry from the same person reuses their contact record.
   // Contact + Site + Deal in one transaction, so a partial failure can't leave
   // an orphaned contact or site behind.
-  // Normalise the email so an empty/whitespace value cleanly skips dedup.
-  const email = (d.email ?? "").trim() || null;
+  // Normalise the email (lowercase) so case variants dedup to one contact, and
+  // an empty/whitespace value cleanly skips dedup.
+  const email = (d.email ?? "").trim().toLowerCase() || null;
 
   const deal = await prisma.$transaction(async (tx) => {
     // Dedup by email when given; Contact is a stable identity anchor, so a
@@ -157,4 +159,27 @@ export async function addActivity(formData: FormData) {
   });
 
   revalidatePath(`/leads/${dealId}`);
+}
+
+// Manual "Sync website leads" trigger (auth-gated by the session). Pulls new
+// quotes/assessments from the website and imports them. The /api/sync route
+// wraps the same syncLeads() for scheduled (cron) runs once deployed.
+export async function syncNow() {
+  await requireUserId();
+  try {
+    const result = await syncLeads();
+    // No revalidatePath here — it would reset the client SyncButton's state and
+    // wipe the result message. The button calls router.refresh() instead.
+    return {
+      ok: true as const,
+      imported: result.imported,
+      skipped: result.skipped,
+    };
+  } catch (err) {
+    console.error("[syncNow]", err);
+    return {
+      ok: false as const,
+      error: err instanceof Error ? err.message : "Sync failed",
+    };
+  }
 }

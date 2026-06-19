@@ -92,6 +92,9 @@ model Site {
 // A sales opportunity — the pipeline unit. Carries stage, source, owner.
 model Deal {
   id         String        @id @default(cuid())
+  // Idempotency key for website-sync imports, e.g. "quote:<id>" / "assessment:<id>".
+  // Null for deals created by hand in the CRM.
+  externalId String?       @unique
   contact    Contact       @relation(fields: [contactId], references: [id], onDelete: Cascade)
   contactId  String
   site       Site?         @relation(fields: [siteId], references: [id], onDelete: SetNull)
@@ -124,4 +127,12 @@ model Activity {
   createdAt DateTime     @default(now())
 
   @@index([dealId])
+}
+
+// High-water mark for incremental pulls from upstream sources (one row per
+// source, e.g. "website"). cursor = the createdAt of the newest imported lead.
+model SyncState {
+  source    String    @id
+  cursor    DateTime?
+  updatedAt DateTime  @updatedAt
 }

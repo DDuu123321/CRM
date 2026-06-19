@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import { prisma } from "@/lib/prisma";
 import { createDeal } from "./actions";
+import { SyncButton } from "./sync-button";
 
 const STAGE_LABELS: Record<string, string> = {
   NEW: "New",
@@ -25,9 +26,12 @@ export default async function PipelinePage() {
 
   return (
     <div className="space-y-8">
-      <section>
-        <h1 className="text-2xl font-semibold">Pipeline</h1>
-        <p className="text-sm text-slate-500">{deals.length} deals</p>
+      <section className="flex items-end justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold">Pipeline</h1>
+          <p className="text-sm text-slate-500">{deals.length} deals</p>
+        </div>
+        <SyncButton />
       </section>
 
       <section className="overflow-hidden rounded-xl border border-slate-200 bg-white">
